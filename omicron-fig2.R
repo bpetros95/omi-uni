@@ -3,7 +3,8 @@
 ## version history ----------------------------------------------------------
 # v1 by J.T. 6 Jan 2022, v2 by B.P. 7 Jan 2022, fig1 by B.P. 9 Jan 2022
 # [JT] v3 by J. T. 11 Jan 2022
-# [JT] more input and output formatting; code testing and commenting
+# [JT] v4 more input and output formatting; code testing and commenting
+# [JT] v5 remove human RNase P gene
 
 ## setup -----------------------------------------------------------------------
 rm(list=ls(all.names=TRUE))
@@ -24,6 +25,7 @@ inst <- read.csv("input-data-freeze/combined-inst.csv",
         filter(Variant %in% c("Delta", "Omicron"), # only keep delta and omicron
                Date >= "2021-12-02",
                Date <= "2021-12-21")
+inst$Ct_RP <- NULL #remove human RNase P gene (pos control)
 
 ## calculate and format adjusted p-values --------------------------------------
 # pairwise comparison for all institutions by primer
@@ -48,7 +50,6 @@ ct <- inst %>%
 
 # calculate FDR-adjusted p-value
 pval <- pairwise.wilcox.test(ct$Ct, ct$Group, p.adjust.method="BH")
-pval
 
 # format adjusted p-values for plotting
 pval <- pval$p.value %>%
@@ -112,7 +113,6 @@ ggsave("outputs/figure2.png", width=12, height=12, units="cm")
 
 # supplemental: NEU ORF
 plot.ct("NEU ORF")
-plot.ct("BU RP")
 
 # table
 ct %>%

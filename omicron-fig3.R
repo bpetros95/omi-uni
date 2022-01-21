@@ -4,6 +4,9 @@
 # v1 by B.P. 9 Jan 2022
 # v2 by J.T. 13 Jan 2022
 # v3 by B.P. 14 Jan 2022 [added case counts over time by affiliation]
+# v4 by B.P. 19 Jan 2022 [added bootstrapping]
+# v5 by B.P. 20 Jan 2022 [updated log reg, added inverse predictions]
+
 
 ## setup -----------------------------------------------------------------------
 rm(list=ls(all.names=TRUE))
@@ -11,6 +14,7 @@ setwd("/Volumes/GoogleDrive/My Drive/Omicron/omicron_repo")
 suppressPackageStartupMessages(library(tidyverse))
 options(stringsAsFactors=FALSE)
 theme_set(theme_classic())
+library('msm') #for delta method
 
 # global variables
 cols <- c(Delta="#bdbdbd", Omicron="#ca0020")
@@ -25,6 +29,39 @@ bu <- read.csv("input-data-freeze/student-v-employee.csv",
              Date >= "2021-12-02",
              Date <= "2021-12-21")
 
+# MA data (GISAID)
+ma <- read.csv("input-data-freeze/gisaid-MA.csv",
+               na.strings="",
+               colClasses=c(date="Date")) %>% # [JT] set col classes while reading
+  filter(variant %in% c("Delta", "Omicron"), # [JT] only keep delta and omicron
+         date >= "2021-12-01",
+         date <= "2022-01-01")
+
+# NE data (GISAID)
+ne <- read.csv("input-data-freeze/gisaid-NE.csv",
+               na.strings="",
+               colClasses=c(date="Date")) %>% # [JT] set col classes while reading
+  filter(variant %in% c("Delta", "Omicron"), # [JT] only keep delta and omicron
+         date >= "2021-12-01",
+         date <= "2022-01-01")
+
+# add MA data to BU
+bu <- ma %>%
+  mutate(Affiliation="MA",
+         Date=date,
+         Variant=variant) %>%
+  select(Affiliation, Date, Variant) %>%
+  full_join(bu, by=c("Affiliation", "Date", "Variant"))
+
+# add NE data to BU
+bu <- ne %>%
+  mutate(Affiliation="NE",
+         Date=date,
+         Variant=variant) %>%
+  select(Affiliation, Date, Variant) %>%
+  full_join(bu, by=c("Affiliation", "Date", "Variant"))
+bu$bin<-ifelse(bu$Variant == "Omicron",1,0)
+
 # format as daily percentages
 prct <- bu %>%
         group_by(Affiliation, Date) %>%
@@ -33,49 +70,13 @@ prct <- bu %>%
                   Cases=n(),
                   .groups="drop") %>%
         mutate(Fraction=Omicron/Cases,
-               Percent=100*Fraction)
-
-# CDC: weekly omicron percent
-cdc <- read.csv("input-data-freeze/cdc-northeast.csv",
-                na.strings="",
-                colClasses=c("Week.start"="Date",
-                             "Week.end"="Date",
-                             "Week.mid"="Date")) %>%
-        mutate(CI95.low=CI95.low/100,
-               CI95.high=CI95.high/100,
-               Date=Week.mid,
-               Fraction=Percent/100,
-               Affiliation="NE") %>%
-        select(Affiliation, Date, Fraction, Percent, CI95.low, CI95.high)
-
-# GISAID data
-gisa <- read.csv("input-data-freeze/gisaid-MA.csv",
-                 colClasses=c(date="Date")) %>%
-        rename(Date=date, Variant=variant) %>%
-        filter(Date >= "2021-12-01",
-               Date <= "2022-01-01") %>%  
-        select(Date, Variant) %>%
-        group_by(Date) %>%
-        summarise(Omicron=sum(Variant=="Omicron"),
-                  Delta=sum(Variant=="Delta"),
-                  Cases=n(),
-                  .groups="drop") %>%
-        mutate(Fraction=Omicron/Cases,
-               Percent=100*Fraction,
-               Affiliation="MA") %>%
-        select(Affiliation, Date, Fraction, Percent)
-
-
-# add CDC and GISAID to prct
-prct <- prct %>%
-        full_join(gisa, by=c("Affiliation", "Date", "Fraction", "Percent")) %>%
-        full_join(cdc, by=c("Affiliation", "Date", "Fraction", "Percent")) %>%
+               Percent=100*Fraction) %>%
         mutate(Affiliation=factor(Affiliation, 
-                                  levels=c("Student", "Employee", "MA", "NE")))
+               levels=c("Student", "Employee", "MA", "NE")))
 
-## logistic growth -------------------------------------------------------------
+## observational figs  ---------------------------------------------------------
 
-# remove MA, CDC and get BU total cases per day
+# remove MA, NE and get BU total cases per day
 tots <- prct %>%
   filter(!Affiliation %in% c("NE", "MA")) %>%
   group_by(Date) %>%
@@ -105,7 +106,7 @@ p1 <- tots %>%
                               "Dec 16", "Dec 21"))
 p1
 ggsave("outputs/cases_bu.png", units="cm", width=15, height=10)
-ggsave("outputs/cases_bu.svg", units="cm", width=15, height=10)
+#ggsave("outputs/cases_bu.svg", units="cm", width=15, height=10)
 
 
 # remove MA, CDC and get BU cases per day by affiliation
@@ -140,35 +141,35 @@ p2 <- affil %>%
                               "Dec 16", "Dec 21"))
 p2
 ggsave("outputs/affil_bu.png", units="cm", width=15, height=10)
-ggsave("outputs/affil_bu.svg", units="cm", width=15, height=10)
+#ggsave("outputs/affil_bu.svg", units="cm", width=15, height=10)
 
 fish = fisher.test(cbind(c(sum(bu$Affiliation == 'Student' & bu$Variant == 'Delta'), 
                            sum(bu$Affiliation == 'Student' & bu$Variant == 'Omicron')),
                          c(sum(bu$Affiliation == 'Employee' & bu$Variant == 'Delta'), 
                            sum(bu$Affiliation == 'Employee' & bu$Variant == 'Omicron'))))
 
+## logistic growth -------------------------------------------------------------
 # students vs. employees vs. CDC
-p3 <- prct %>%
-      ggplot(aes(Date, Fraction, ymin=CI95.low, ymax=CI95.high)) +
-      stat_smooth(data=subset(prct, Affiliation!="NE"), aes(col=Affiliation), 
-                  method="glm", se = FALSE, fullrange=TRUE, 
-                  method.args = list(family=binomial)) +
-      geom_errorbar(data=subset(prct, Affiliation=="NE"), size=1, width=1, col="darkgrey") +
-      geom_point(aes(fill=Affiliation), pch=21, size=3) +
-      scale_color_manual(values=affl) +
-      scale_fill_manual(values=affl) +
-      labs(x="date", 
-           y="Omicron fraction",
-           fill="affiliation") +
-      scale_x_continuous(breaks=as.Date(c("2021-11-30", "2021-12-05", "2021-12-10", 
-                                          "2021-12-15", "2021-12-20", "2021-12-25", "2021-12-30", "2022-01-4")), 
-                         limits=as.Date(c("2021-11-30", "2022-01-05")),
-                         labels=c("Nov 30","Dec 5", "Dec 10","Dec 15","Dec 20",
-                                  "Dec 25","Dec 30", "Jan 4")) +
-      guides(col=FALSE) # [JT] removed extra legend
+p3 <- bu %>%
+  ggplot(aes(Date, bin)) +
+  stat_smooth(data=bu, aes(col=Affiliation), 
+              method="glm", se=FALSE, fullrange=TRUE, 
+              method.args=list(family=binomial)) +
+  geom_point(data = prct, aes(Date, Fraction, fill=Affiliation), pch=21, size=3)  +
+  scale_color_manual(values=affl) +
+  scale_fill_manual(values=affl) +
+  labs(x="date", 
+       y="Omicron fraction",
+       fill="Affiliation") +
+  scale_x_continuous(breaks=as.Date(c("2021-11-30", "2021-12-05", "2021-12-10", 
+                                      "2021-12-15", "2021-12-20", "2021-12-25", "2021-12-30", "2022-01-4")), 
+                     limits=as.Date(c("2021-11-30", "2022-01-06")),
+                     labels=c("Nov 30","Dec 5", "Dec 10","Dec 15","Dec 20",
+                              "Dec 25","Dec 30", "Jan 4")) +
+  guides(col="none") # [JT] removed extra legend
 p3
 ggsave("outputs/logfit-bu.png", units="cm", width=20, height=10)
-ggsave("outputs/logfit-bu.svg", units="cm", width=15, height=10)
+#ggsave("outputs/logfit-bu.svg", units="cm", width=15, height=10)
 
 # concatenate
 p <- cowplot::plot_grid(p1, p2, 
@@ -182,70 +183,118 @@ ggsave("outputs/figure3.png", units="cm", width=20, height=20)
 #ggsave("outputs/figure3.svg", units="cm", width=20, height=20)
 
 # logistic fits
-fits <- unique(subset(prct, Affiliation!="NE")$Affiliation) %>%
-        lapply(function(i) {
-          prct %>%
-            filter(Affiliation==i) %>%
-            glm(Fraction ~ Date, data=., family="binomial")
-        }) 
-names(fits) <- unique(subset(prct, Affiliation!="NE")$Affiliation)
+fits <- unique(bu$Affiliation) %>%
+  lapply(function(i) {
+    bu %>%
+      filter(Affiliation==i) %>%
+      glm(bin ~ Date, data=., family="binomial")
+  }) 
+names(fits) <- unique(bu$Affiliation)
 
 # null model to determine McFadden's R^2
-null <- unique(subset(prct, Affiliation!="NE")$Affiliation) %>%
-        lapply(function(i) {
-          prct %>%
-            filter(Affiliation==i) %>%
-            glm(Fraction ~ 1, data=., family="binomial")
-        }) 
-names(null) <- unique(subset(prct, Affiliation!="NE")$Affiliation)
+null <- unique(bu$Affiliation) %>%
+  lapply(function(i) {
+    bu %>%
+      filter(Affiliation==i) %>%
+      glm(bin ~ 1, data=., family="binomial")
+  }) 
+names(null) <- unique(bu$Affiliation)
+
 
 # summary statistics for each logistic model
 # Student
+summary(fits$Student)
 confint(fits$Student, '(Intercept)', 0.95)
 confint(fits$Student, 'Date', 0.95)
 r2 <- 1-logLik(fits$Student)/logLik(null$Student)
-pred <- data.frame(Date=seq(as.Date("2021-11-30"), as.Date("2021-12-31"), by="days"))
-pred <- ciTools::add_ci(pred, fits$Student, type="boot", names=c("lwr", "upr"), 
-                        alpha=0.05, nSims=500) %>%
-        mutate(type="bootstrap")
-pred$Affiliation <- "Student"
-ci <- pred
+
 # Employee
+summary(fits$Employee)
 confint(fits$Employee, '(Intercept)', 0.95)
 confint(fits$Employee, 'Date', 0.95)
 r2 <- 1-logLik(fits$Employee)/logLik(null$Employee)
-pred <- data.frame(Date=seq(as.Date("2021-11-30"), as.Date("2021-12-31"), by="days"))
-pred <- ciTools::add_ci(pred, fits$Employee, type="boot", names=c("lwr", "upr"), 
-                        alpha=0.05, nSims=500) %>%
-        mutate(type="bootstrap")
-pred$Affiliation <- "Employee"
-ci <- rbind(ci, pred)
+
 # MA
+summary(fits$MA)
 confint(fits$MA, '(Intercept)', 0.95)
 confint(fits$MA, 'Date', 0.95)
 r2 <- 1-logLik(fits$MA)/logLik(null$MA)
-pred <- data.frame(Date=seq(as.Date("2021-11-30"), as.Date("2021-12-31"), by="days"))
-pred <- ciTools::add_ci(pred, fits$MA, type="boot", names=c("lwr", "upr"), 
-                        alpha=0.05, nSims=500) %>%
-        mutate(type="bootstrap")
-pred$Affiliation <- "MA"
-ci <- rbind(ci, pred)
 
-# write 95% CIs to .csv
-ci <- ci %>%
-      rename("Point_est"="pred", "CI95_upper"="upr", "CI95_lower"="lwr")
-ci <- ci[,!(names(ci) %in% "type")]
-write.csv(ci, "outputs/bootstrap_ci_logfit_affiliation.csv", row.names=FALSE)
+# NE
+summary(fits$NE)
+confint(fits$NE, '(Intercept)', 0.95)
+confint(fits$NE, 'Date', 0.95)
+r2 <- 1-logLik(fits$NE)/logLik(null$NE)
 
 # clean up
 rm(affil, ci, fish, fits, null, p1, p2, p3, p, pred, r2, tots)
 
+## inference--------------------------------------------------------------------
+# functions
+logit <- function(p){log(p/(1-p))}
+
+# generate point estimates and 95% CIs for O10, O50, O90 using inverse pred
+# adapted from https://www.talkstats.com/threads/inverse-prediction-from-binary-logistic-regression.52121/
+omi_cis = data.frame()
+# loop over each institution x Omicron fraction
+for (ins in unique(bu$Affiliation)){
+  for (p in c(0.1, 0.5, 0.9)){
+    mod <- glm(bin ~ Date, data=subset(bu, bu$Affiliation == ins), family="binomial")
+    est <- unname((logit(p) - coef(mod)[1])/coef(mod)[2])
+    se <- deltamethod(~ (log(p/(1-p)) - x1)/x2, coef(mod), vcov(mod))
+    ci <- est + c(-1, 1) * qt(0.975, sum(prct$Affiliation == ins) - 1) * se
+    cis <- data.frame(affil = ins, prct = p, est = as.Date(est), e = est, stderr = se, 
+                      ci_low = as.Date(ci[1]), ci_high = as.Date(ci[2]), n = sum(prct$Affiliation == ins))
+    omi_cis = rbind(omi_cis, cis)}}
+write.csv(omi_cis[c("affil", "prct", "est", "ci_low", "ci_high")], 
+          'outputs/affil_cis_inv_pred.csv', row.names = FALSE)
+rm (ci, cis, est, ins, mod, p, se)
+
+
+# generate p-vals and time differences for O10, O50, O90 by inst using inverse pred
+ttest = data.frame(affil1 = combn(unique(bu$Affiliation), 2)[1,], 
+                   affil2 = combn(unique(bu$Affiliation), 2)[2,]) %>%
+  slice(rep(1:n(), each = 3))
+ttest$prct = rep(c(0.1, 0.5, 0.9), times = length(ttest$affil1)/3)
+
+t = data.frame()
+for (r in 1:length(ttest$affil1)){
+  x = subset(omi_cis, affil == ttest$affil1[r] & prct == ttest$prct[r])
+  y = subset(omi_cis, affil == ttest$affil2[r] & prct == ttest$prct[r])
+  tt = tsum.test(x$e, x$stderr, x$n, y$e, y$stderr, y$n, conf.level = 0.95)
+  t = rbind(t, data.frame(est = tt[["estimate"]][1] - tt[["estimate"]][2],
+                          ci_low = tt$conf.int[1], ci_high = tt$conf.int[2], 
+                          pval = tt$p.value))}
+ttest = cbind(ttest, t)
+ttest$padj = p.adjust(ttest$pval, method = "BH")
+write.csv(ttest, 'outputs/affil_ttest.csv', row.names = FALSE)
+rm(r, t, tt, x, y)
+
+
+# generate CIs and time differences for deltaO(90-10) by inst using inverse pred
+omi_delta = data.frame()
+# loop over each institution
+for (ins in unique(bu$Affiliation)){
+  x = subset(omi_cis, affil == ins & prct == 0.9)
+  y = subset(omi_cis, affil == ins & prct == 0.1)
+  tt = tsum.test(x$e, x$stderr, x$n, y$e, y$stderr, y$n, conf.level = 0.95)
+  omi_delta = rbind(omi_delta, data.frame(affil = ins, 
+                                          est = tt[["estimate"]][1] - tt[["estimate"]][2],
+                                          ci_low = tt$conf.int[1], ci_high = tt$conf.int[2], 
+                                          pval = tt$p.value))}
+rm(ins, tt, x, y)
+write.csv(omi_delta, 'outputs/affil_delta_ttest.csv', row.names = FALSE)
+
+#clean up
+rm(logit, omi_cis, omi_delta, ttest)
+
 ## Ct comparison ---------------------------------------------------------------
+# remove human gene
+bu$Ct_RP <- NULL
 
 # compare across-affiliation Cts
 pval = wilcox.test(bu$Ct_N1[bu$Affiliation == 'Student'], bu$Ct_N1[bu$Affiliation == 'Employee'])$p.value
 pval = wilcox.test(bu$Ct_N2[bu$Affiliation == 'Student'], bu$Ct_N2[bu$Affiliation == 'Employee'])$p.value
-pval = wilcox.test(bu$Ct_RP[bu$Affiliation == 'Student'], bu$Ct_RP[bu$Affiliation == 'Employee'])$p.value
 
 # compare within-affiliation variant vs. primer
 ct <- bu %>%
@@ -266,7 +315,6 @@ ct <- bu %>%
 
 # calculate FDR-adjusted p-value
 pval <- pairwise.wilcox.test(ct$Ct, ct$Group, p.adjust.method="BH")
-pval
 
 # format adjusted p-values for plotting
 pval <- pval$p.value %>%
@@ -326,14 +374,7 @@ p3 <- plot.ct("Student N2")
 p4 <- plot.ct("Employee N2")
 cowplot::plot_grid(p1, p2, p3, p4, ncol=2, labels="AUTO")
 ggsave("outputs/supp_figure3.png", width=12, height=12, units="cm")
-ggsave("outputs/supp_figure3.svg", width=12, height=12, units="cm")
-
-# supplemental: NEU ORF
-p1 = plot.ct("Student RP")
-p2 = plot.ct("Employee RP")
-cowplot::plot_grid(p1, p2, ncol=2, labels="AUTO")
-ggsave("outputs/supp_figure4.png", width=12, height=12, units="cm")
-ggsave("outputs/supp_figure4.svg", width=12, height=12, units="cm")
+#ggsave("outputs/supp_figure3.svg", width=12, height=12, units="cm")
 
 # table
 ct %>%
