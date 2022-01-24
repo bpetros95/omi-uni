@@ -338,6 +338,9 @@ p1 = tots %>%
   ggplot(aes(Date, Roll, fill = Label)) +
   geom_smooth(aes(Date, Roll, col = Label), se = F, show.legend = F, span = 0.75) +
   geom_point(aes(Date, Roll), pch = 21, size=3)  +
+  geom_segment(aes(x = as.Date("2021-12-18"), y = 0, xend = as.Date("2021-12-18"), yend = 300),
+               linetype="dashed", color = "black", size=1) +
+  geom_text(x = as.Date("2021-12-18"), y = 325, label = 'end of fall term', size = 3) +
   scale_color_manual(values=instvarcols) +
   scale_fill_manual(values=instvarcols) +
   scale_y_continuous("Cases per 100K",limits = c(0, 400)) + 
