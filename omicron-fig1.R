@@ -1,27 +1,33 @@
 #!/usr/bin/env Rscript
 
 ## version history -------------------------------------------------------------
-# v1 by J.T. 6 Jan 2022, v2 by B.P. 7 Jan 2022, fig1 by B.P. 9 Jan 2022
+# v1 by J.T. 6 Jan 2022, v2 by B.P. 7 Jan 2022, v3 by B.P. 9 Jan 2022
 # updated input data, analyzed logistic fits
-# [JT] v3 by J. T. 11 Jan 2022
-# [JT] more input and output formatting; code testing and commenting
-# B.P. v4, updated CIs to include dates b/w 11-30 and 12-31
-# B.P. v5, added GISAID data and MA curves
-# B.P. v6, added MA data post-university dates
-# B.P. v7, added MA and NE new cases per day
-# B.P. v8, added inverse predictions
+# [JT] v4 by J. T. 11 Jan 2022
+# [JT] v5 more input and output formatting; code testing and commenting
+# B.P. v6, updated CIs to include dates b/w 11-30 and 12-31
+# B.P. v7, added GISAID data and MA curves
+# B.P. v8, added MA data post-university dates
+# B.P. v9, added MA and NE new cases per day
+# B.P. v10, added inverse predictions
+# B.P. v11, added cases per day panel
+# B.P. v12, input and output formatting; code testing and commenting
 
 ## setup -----------------------------------------------------------------------
 rm(list=ls(all.names=TRUE))
 setwd("/Volumes/GoogleDrive/My Drive/Omicron/omicron_repo")
-suppressPackageStartupMessages(library(tidyverse)) # [JT] load libs in script
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(zoo))
 options(stringsAsFactors=FALSE)
 theme_set(theme_classic())
-library('msm')
+library('BSDA') #for t tests
+library('msm') #for delta method
+library('zoo') #for working with dates
 
 # global variables
-cols <- c(Delta="#bdbdbd", Omicron="#ca0020")
-casecols <- c(colleges="#ca0020", MA="black", NE='darkgrey')
+instcols <- c(IHEs="#ca0020", MA="black", NE='darkgrey')
+instvarcols <- c("Delta (IHEs)" = "#984ea3", "Omicron (IHEs)" = "#ca0020", 
+                 "Delta (MA)" = "black", "Omicron (MA)" = "darkgrey")
 
 ## inputs ----------------------------------------------------------------------
 # institutions: every case
@@ -29,7 +35,7 @@ inst <- read.csv("input-data-freeze/combined-inst.csv",
                  na.strings="",
                  colClasses=c(Date="Date")) %>% # [JT] set col classes while reading
         filter(Variant %in% c("Delta", "Omicron"), # [JT] only keep delta and omicron
-               Date >= "2021-12-02",
+               Date >= "2021-12-02", # only keep dates w/ data for all IHEs
                Date <= "2021-12-21")
 
 # MA data (GISAID)
@@ -45,6 +51,7 @@ ne <- read.csv("input-data-freeze/gisaid-NE.csv",
                na.strings="",
                colClasses=c(date="Date")) %>% # [JT] set col classes while reading
   filter(variant %in% c("Delta", "Omicron"), # [JT] only keep delta and omicron
+         division != "Massachusetts", # NE minus MA (e.g., CT, ME, NH, RI, VT)
          date >= "2021-12-01",
          date <= "2022-01-01")
 
@@ -58,12 +65,13 @@ inst <- ma %>%
 
 # add NE data to inst
 inst <- ne %>%
-  mutate(Institution="NE",
+  mutate(Institution="NE (without MA)",
          Date=date,
          Variant=variant) %>%
   select(Institution, Date, Variant) %>%
-  full_join(inst, by=c("Institution", "Date", "Variant"))
-inst$bin<-ifelse(inst$Variant == "Omicron",1,0)
+  full_join(inst, by=c("Institution", "Date", "Variant")) %>%
+  mutate(bin = ifelse(Variant == "Omicron",1,0))
+rm(ma, ne)
 
 # format as daily percentages
 prct <- inst %>%
@@ -74,43 +82,57 @@ prct <- inst %>%
                   .groups="drop") %>%
         mutate(Fraction=Omicron/Cases,
                Percent=100*Fraction) %>%
-        mutate(Institution=factor(Institution, levels=c("BU", "HU", "NEU", "MA", "NE")))
+        mutate(Institution=factor(Institution, levels=c("BU", "HU", "NU", "MA", "NE (without MA)")))
 
-#add total case counts for MA and state from CDC
-states <- read.csv("input-data-freeze/cdc-cases-state.csv",
+#daily case counts for MA (CDC)
+ma <- read.csv("input-data-freeze/cdc-cases-state.csv",
                    na.strings="",
                    colClasses=c(date="Date")) %>% # [JT] set col classes while reading
   filter(date >= "2021-12-01",
-         date <= "2022-01-15")
-ma_case = subset(states, states$state == 'MA')
+         date <= "2022-01-15",
+         state == "MA") %>%
+  mutate(day = weekdays(date)) %>% # note weekday vs. weekend variation
+  arrange(date)
 
-# add cases across NE states
-ne_case <- states %>%
+#daily case counts for NE (CDC)
+ne <- read.csv("input-data-freeze/cdc-cases-state.csv",
+               na.strings="",
+               colClasses=c(date="Date")) %>% # [JT] set col classes while reading
+  filter(date >= "2021-12-01",
+         date <= "2022-01-15") %>%
+  mutate(day = weekdays(date)) %>% # note weekday vs. weekend variation
+  arrange(date) %>%
   group_by(date) %>%
   summarise(cases=sum(tot_cases))
-rm(states)
+
+# population sizes
+ma_pop = 7033469 #from Wikipedia
+ne_pop = 15116205 #from Wikipedia
+BU = 43904 #from BU
+HU = 38434 #from HUCL
+NU = 30602 #from NU
+col_pop = NU + BU + HU #total college testing program size
+rm(BU, HU, NU)
 
 ## logistic fits ---------------------------------------------------------------
-# figure 1C
-p3 <- inst %>%
+# figure 1B
+p2 <- inst %>%
       ggplot(aes(Date, bin)) +
       stat_smooth(data=inst, aes(col=Institution), 
                   method="glm", se=FALSE, fullrange=TRUE, 
                   method.args=list(family=binomial)) +
       geom_point(data = prct, aes(Date, Fraction, fill=Institution), pch=21, size=3)  +
-      scale_color_manual(values=c("BU"="#1b9e77","HU"="#d95f02", "NEU"="#7570b3", "MA"="black", "NE"="darkgray")) +
-      scale_fill_manual(values=c("BU"="#1b9e77","HU"="#d95f02", "NEU"="#7570b3", "MA"="black", "NE"="darkgray")) +
-      labs(x="date", 
+      scale_color_manual(values=c("BU"="#1b9e77","HU"="#d95f02", "NU"="#7570b3", "MA"="black", "NE (without MA)"="darkgray")) +
+      scale_fill_manual(values=c("BU"="#1b9e77","HU"="#d95f02", "NU"="#7570b3", "MA"="black", "NE (without MA)"="darkgray")) +
+      labs(x="Date", 
            y="Omicron fraction",
-           fill="institution",
-           col="institution") +
-      scale_x_continuous(breaks=as.Date(c("2021-11-30", "2021-12-05", "2021-12-10", 
-                                          "2021-12-15", "2021-12-20", "2021-12-25", "2021-12-30", "2022-01-4")), 
-                         limits=as.Date(c("2021-11-30", "2022-01-06")),
-                         labels=c("Nov 30","Dec 5", "Dec 10","Dec 15","Dec 20",
-                                  "Dec 25","Dec 30", "Jan 4")) +
-      guides(col="none") # [JT] removed extra legend
-p3
+           fill="Institution",
+           col="Institution") +
+      theme(legend.text=element_text(size=12), legend.title=element_text(size=14)) +
+      scale_x_continuous(breaks=as.Date(c("2021-12-01", "2021-12-06", "2021-12-12", 
+                                          "2021-12-18", "2021-12-24", "2022-01-01")),
+                         labels=c("Dec 1","Dec 6", "Dec 12","Dec 18","Dec 24", "Jan 1")) + guides(col="none") # [JT] removed extra legend
+p2
 ggsave("outputs/logfit.png", units="cm", width=20, height=10)
 #ggsave("outputs/logfit.svg", units="cm", width=15, height=10)
 
@@ -145,11 +167,11 @@ confint(fits$HU, '(Intercept)', 0.95)
 confint(fits$HU, 'Date', 0.95)
 r2 <- 1-logLik(fits$HU)/logLik(null$HU)
 
-# NEU
-summary(fits$NEU)
-confint(fits$NEU, '(Intercept)', 0.95)
-confint(fits$NEU, 'Date', 0.95)
-r2 <- 1-logLik(fits$NEU)/logLik(null$NEU)
+# NU
+summary(fits$NU)
+confint(fits$NU, '(Intercept)', 0.95)
+confint(fits$NU, 'Date', 0.95)
+r2 <- 1-logLik(fits$NU)/logLik(null$NU)
 
 # MA
 summary(fits$MA)
@@ -158,27 +180,30 @@ confint(fits$MA, 'Date', 0.95)
 r2 <- 1-logLik(fits$MA)/logLik(null$MA)
 
 # NE
-summary(fits$NE)
-confint(fits$NE, '(Intercept)', 0.95)
-confint(fits$NE, 'Date', 0.95)
-r2 <- 1-logLik(fits$NE)/logLik(null$NE)
+summary(fits$'NE (without MA)')
+confint(fits$'NE (without MA)', '(Intercept)', 0.95)
+confint(fits$'NE (without MA)', 'Date', 0.95)
+r2 <- 1-logLik(fits$'NE (without MA)')/logLik(null$'NE (without MA)')
 
+# get MA Omicron fraction per day to estimate variant-spec case counts
+ma_prct <- data.frame(Date = seq(as.Date('2021-12-01'), as.Date('2022-01-15'), by = 1))
+ma_prct$prct <- predict(fits$MA, ma_prct, se.fit = F, type = 'response')
 rm(fits, null, pred, r2)
 
 ## inference--------------------------------------------------------------------
 # functions
 logit <- function(p){log(p/(1-p))}
 
-# generate point estimates and 95% CIs for O10, O50, O90 using inverse pred
-# adapted from https://www.talkstats.com/threads/inverse-prediction-from-binary-logistic-regression.52121/
+# point estimates and 95% CIs for O10, O50, O90 using delta method
+# adapted from www.talkstats.com/threads/inverse-prediction-from-binary-logistic-regression.52121/
 omi_cis = data.frame()
 # loop over each institution x Omicron fraction
-for (ins in unique(inst$Institution)){
+for (ins in unique(inst$Institution[inst$Institution != "NE (without MA)"])){
   for (p in c(0.1, 0.5, 0.9)){
     mod <- glm(bin ~ Date, data=subset(inst, inst$Institution == ins), family="binomial")
     est <- unname((logit(p) - coef(mod)[1])/coef(mod)[2])
-    se <- deltamethod(~ (log(p/(1-p)) - x1)/x2, coef(mod), vcov(mod))
-    ci <- est + c(-1, 1) * qt(0.975, sum(prct$Institution == ins) - 1) * se
+    se <- deltamethod(~ (log(p/(1-p)) - x1)/x2, coef(mod), vcov(mod)) #delta method to estimate standard error
+    ci <- est + c(-1, 1) * qt(0.975, sum(prct$Institution == ins) - 1) * se #95% CI via student's t distribution
     cis <- data.frame(inst = ins, prct = p, est = as.Date(est), e = est, stderr = se, 
                      ci_low = as.Date(ci[1]), ci_high = as.Date(ci[2]), n = sum(prct$Institution == ins))
     omi_cis = rbind(omi_cis, cis)}}
@@ -187,9 +212,9 @@ write.csv(omi_cis[c("inst", "prct", "est", "ci_low", "ci_high")],
 rm (ci, cis, est, ins, mod, p, se)
 
 
-# generate p-vals and time differences for O10, O50, O90 by inst using inverse pred
-ttest = data.frame(inst1 = combn(unique(inst$Institution), 2)[1,], 
-        inst2 = combn(unique(inst$Institution), 2)[2,]) %>%
+# generate delta t and pval for O10, O50, O90 by inst
+ttest = data.frame(inst1 = combn(unique(inst$Institution[inst$Institution != "NE (without MA)"]), 2)[1,], 
+        inst2 = combn(unique(inst$Institution[inst$Institution != "NE (without MA)"]), 2)[2,]) %>%
         slice(rep(1:n(), each = 3))
 ttest$prct = rep(c(0.1, 0.5, 0.9), times = length(ttest$inst1)/3)
 
@@ -197,7 +222,7 @@ t = data.frame()
 for (r in 1:length(ttest$inst1)){
   x = subset(omi_cis, inst == ttest$inst1[r] & prct == ttest$prct[r])
   y = subset(omi_cis, inst == ttest$inst2[r] & prct == ttest$prct[r])
-  tt = tsum.test(x$e, x$stderr, x$n, y$e, y$stderr, y$n, conf.level = 0.95)
+  tt = tsum.test(x$e, x$stderr, x$n, y$e, y$stderr, y$n, conf.level = 0.95) #two-sample student's t test
   t = rbind(t, data.frame(est = tt[["estimate"]][1] - tt[["estimate"]][2],
                           ci_low = tt$conf.int[1], ci_high = tt$conf.int[2], 
                           pval = tt$p.value))}
@@ -207,13 +232,13 @@ write.csv(ttest, 'outputs/omicron_ttest.csv', row.names = FALSE)
 rm(r, t, tt, x, y)
 
 
-# generate CIs and time differences for deltaO(90-10) by inst using inverse pred
+# generate point estimates and CIs for deltaO(90-10) by inst
 omi_delta = data.frame()
 # loop over each institution
-for (ins in unique(inst$Institution)){
+for (ins in unique(inst$Institution[inst$Institution != "NE (without MA)"])){
   x = subset(omi_cis, inst == ins & prct == 0.9)
   y = subset(omi_cis, inst == ins & prct == 0.1)
-  tt = tsum.test(x$e, x$stderr, x$n, y$e, y$stderr, y$n, conf.level = 0.95)
+  tt = tsum.test(x$e, x$stderr, x$n, y$e, y$stderr, y$n, conf.level = 0.95) #95% CI via student's t distribution
   omi_delta = rbind(omi_delta, data.frame(inst = ins, 
                             est = tt[["estimate"]][1] - tt[["estimate"]][2],
                             ci_low = tt$conf.int[1], ci_high = tt$conf.int[2], 
@@ -224,138 +249,118 @@ write.csv(omi_delta, 'outputs/omicron_delta_ttest.csv', row.names = FALSE)
 #clean up
 rm(logit, omi_cis, omi_delta, ttest)
 
-## observational figs-----------------------------------------------------------
-# remove CDC and get total cases per day
+## daily cases------------------------------------------------------------------
+# total college cases per day
 tots <- prct %>%
-        filter(!Institution %in% c("NE", "MA")) %>%
-        group_by(Date) %>%
-        summarise(Omicron=sum(Omicron),
-                  Delta=sum(Delta),
-                  Total=sum(Cases),
-                  .groups="drop") %>%
-        reshape2::melt(id.vars=c("Date", "Total"),
-                       variable.name="Variant",
-                       value.name="Cases") %>%
-        mutate(Fraction=Cases/Total)
+  filter(!Institution %in% c("NE (without MA)", "MA")) %>%
+  group_by(Date) %>%
+  summarise(Omicron=sum(Omicron),
+            Delta=sum(Delta),
+            Total=sum(Cases),
+            .groups="drop") %>%
+  reshape2::melt(id.vars=c("Date", "Total"),
+                 variable.name="Variant",
+                 value.name="Cases") %>%
+  mutate(Group="IHEs")
 
-# college cases by variant
-# [JT] fixed axis
-p1 <- tots %>%
-      filter((Date >= as.Date("2021-12-02")) & (Date <= as.Date("2021-12-21"))) %>%
-      ggplot(aes(Date, Cases, fill=Variant)) +
-      geom_col(col="black", position="stack") +
-      scale_fill_manual(values=cols) +
-      labs(x="date", 
-           y="SARS-CoV-2-positive individuals",
-           fill="variant") +
-      scale_x_continuous(breaks=as.Date(c("2021-12-02", "2021-12-06", "2021-12-11", 
-                                          "2021-12-16", "2021-12-21")), 
-                         limits=c(as.Date("2021-12-01"), 
-                                  as.Date("2021-12-22")), 
-                         labels=c("Dec 02", "Dec 06", "Dec 11", 
-                                  "Dec 16", "Dec 21"))
-p1
-ggsave("outputs/cases.png", units="cm", width=15, height=10)
-#ggsave("outputs/cases.svg", units="cm", width=15, height=10)
+# add MA data to tots
+ma$Omicron <- ma$tot_cases*ma_prct$prct
+ma$Delta <- ma$tot_cases*(1-ma_prct$prct)
 
+tots <- ma %>%
+  group_by(date) %>%
+  summarise(Omicron=sum(Omicron),
+            Delta=sum(Delta),
+            Total=sum(tot_cases),
+            .groups="drop") %>%
+  reshape2::melt(id.vars=c("date", "Total"),
+                 variable.name="Variant",
+                 value.name="Cases") %>%
+  mutate(Group="MA", Date = date) %>%
+  select(Cases, Date, Group, Total, Variant) %>%
+  full_join(tots, by=c("Cases", "Date", "Group", "Total", "Variant"))
 
-# frequency
-# [JT] fixed axis
-p2 <- tots %>%
-  mutate(Variant=factor(Variant, levels=c("Delta", "Omicron"))) %>%
-  filter((Date >= as.Date("2021-12-02")) & (Date <= as.Date("2021-12-21"))) %>%
-  ggplot(aes(Date, Fraction, fill=Variant)) +
-  geom_col(col="black", position="stack") +
-  scale_fill_manual(values=cols) +
-  labs(x="date", 
-       y="Omicron fraction",
-       fill="variant")  +
-  scale_x_continuous(breaks=as.Date(c("2021-12-02", "2021-12-06", "2021-12-11", 
-                                      "2021-12-16", "2021-12-21")), 
-                     limits=c(as.Date("2021-12-01"), 
-                              as.Date("2021-12-22")), 
-                     labels=c("Dec 02", "Dec 06", "Dec 11", 
-                              "Dec 16", "Dec 21"))
-p2
-ggsave("outputs/frequency.png", units="cm", width=15, height=10)
-#ggsave("outputs/frequency.svg", units="cm", width=15, height=10)
+# add NE data to tots
+tots <- ne %>%
+  mutate(Group = "NE", Date = date, Total = cases) %>%
+  select(Group, Date, Total) %>%
+  full_join(tots, by = c("Total", "Date", "Group"))
+rm(ma, ma_prct, ne)
 
+# reported case counts per 100K
+tots$Rep = 100000*c(tots$Total[tots$Group == "NE"]/ne_pop, tots$Total[tots$Group == "MA"]/ma_pop,
+                    tots$Total[tots$Group == "IHEs"]/col_pop)
 
-# combine college, MA, NE cases
-college = data.frame(group = "colleges", cases = tots$Total, date = tots$Date,
-                     roll = rollmean(tots$Total, 3, na.pad = TRUE))
-mass = data.frame(group = "MA", cases = ma_case$tot_cases, date = ma_case$date,
-                  roll = rollmean(ma_case$tot_cases, 7, na.pad = TRUE))
-region = data.frame(group = "NE", cases = ne_case$cases, date = ne_case$date,
-                    roll = rollmean(ne_case$cases, 7, na.pad = TRUE))
-total = rbind(college, mass, region)
-rm(college, mass, region)
-total$merge <- ifelse(is.na(total$roll),total$cases,total$roll)
-total$plot <-ifelse(total$group %in% c("MA", "NE"),total$merge/100, total$merge)
+# rolling case counts (due to weekly variation) per 100K
+tots$Roll = 100000*c(rollmean(tots$Total[tots$Group == "NE"]/ne_pop, 7, na.pad = T), 
+  rollmean(tots$Total[tots$Group == "MA"]/ma_pop, 7, na.pad = T),
+  rollmean(tots$Total[tots$Group == "IHEs"]/col_pop, 3, na.pad = T))
 
- 
-## plot total case counts over time
-p4 = total %>%
-    filter((date >= as.Date("2021-12-02")) & (date <= as.Date("2022-01-14"))) %>%
-    ggplot(aes(date, plot, fill = group)) +
-    geom_line(aes(date, plot, col = group), show.legend = F, size = 2) +
-    geom_point(aes(date, plot), pch=21, size=3)  +
-    scale_color_manual(values=casecols) +
-    scale_fill_manual(values=casecols) +
-    scale_y_continuous("Cases (colleges) ",
-    sec.axis = sec_axis(~ . * 100, name = "Cases (MA, NE)")) +
-    labs(x="date",
-        y="case count",
-        fill="Group")  +
-    theme(legend.position = c(0.1, 0.8)) +
-    scale_x_continuous(breaks=as.Date(c("2021-12-02", "2021-12-06", "2021-12-11",
-                                        "2021-12-16", "2021-12-21", "2021-12-26",
-                                        "2021-12-31", "2022-01-05", "2022-01-10", 
-                                        "2022-01-15")),
+## case plots-------------------------------------------------------------------
+
+## plot case counts per 100K over time
+ps = tots %>%
+    filter((Date >= as.Date("2021-12-01")) & (Date <= as.Date("2022-01-15"))) %>%
+    ggplot(aes(Date, Rep, fill = Group)) +
+    geom_point(aes(Date, Rep), pch=21, size=3)  +
+    scale_color_manual(values=instcols) +
+    scale_fill_manual(values=instcols) +
+    scale_y_continuous("Reported cases per 100K") + 
+    theme(legend.text=element_text(size=14), legend.title=element_text(size=14)) +
+    labs(x="Date",
+        fill="Institution")  +
+    scale_x_continuous(breaks=as.Date(c("2021-12-01", "2021-12-10", "2021-12-20",
+                                        "2021-12-30", "2022-01-7", "2022-01-15")),
                       limits=c(as.Date("2021-12-01"),
                                 as.Date("2022-1-15")),
-                      labels=c("Dec 02", "Dec 06", "Dec 11",
-                                "Dec 16", "Dec 21", "Dec 26",
-                               "Dec 31", "Jan 5", "Jan 10", "Jan 15"))
-p4
-ggsave("outputs/tot_cases.png", units="cm", width=15, height=10)
-#ggsave("outputs/tot_cases.svg", units="cm", width=15, height=10)
+                      labels=c("Dec 01", "Dec 10", "Dec 20",
+                                "Dec 30", "Jan 07", "Jan 15"))
+ps
+ggsave("outputs/cases_per_100k.png", units="cm", width=20, height=10)
+#ggsave("outputs/cases_per_100k.svg", units="cm", width=15, height=10)
+rm(instcols, ps)
 
-# frequency
-# [JT] fixed axis
-p2 <- tots %>%
-      mutate(Variant=factor(Variant, levels=c("Delta", "Omicron"))) %>%
-      filter((Date >= as.Date("2021-12-02")) & (Date <= as.Date("2021-12-21"))) %>%
-      ggplot(aes(Date, Fraction, fill=Variant)) +
-      geom_col(col="black", position="stack") +
-      scale_fill_manual(values=cols) +
-      labs(x="date", 
-           y="Omicron fraction",
-           fill="variant")  +
-      scale_x_continuous(breaks=as.Date(c("2021-12-02", "2021-12-06", "2021-12-11", 
-                                          "2021-12-16", "2021-12-21")), 
-                         limits=c(as.Date("2021-12-01"), 
-                                  as.Date("2021-12-22")), 
-                         labels=c("Dec 02", "Dec 06", "Dec 11", 
-                                  "Dec 16", "Dec 21"))
-p2
-ggsave("outputs/frequency.png", units="cm", width=15, height=10)
-#ggsave("outputs/frequency.svg", units="cm", width=15, height=10)
+# subset variant-specific college and MA cases
+tots = tots %>%
+  filter(Group != "NE") %>%
+  mutate(Label = paste(Variant, ' (' ,Group, ')', sep = ""))
 
-# concatenate
-p <- cowplot::plot_grid(p1+theme(legend.position="none"), p2,
-                        ncol=2, rel_widths=c(1, 1.2),
-                        labels=c("B", "C"))
-p <- cowplot::plot_grid(p4, p, nrow=2,
-                        labels=c("A", ""))
-p <- cowplot::plot_grid(p, p3, nrow=2,
-                        labels=c("", "D"), rel_heights=c(2, 1))
+# rolling variant-specific case counts per 100K
+tots$Roll = 100000*c(rollmean(tots$Cases[tots$Label == "Omicron (MA)"]/ma_pop, 7, na.pad = T),
+                     rollmean(tots$Cases[tots$Label == "Delta (MA)"]/ma_pop, 7, na.pad = T),
+                     rollmean(tots$Cases[tots$Label == "Omicron (IHEs)"]/col_pop, 3, na.pad = T),
+                     rollmean(tots$Cases[tots$Label == "Delta (IHEs)"]/col_pop, 3, na.pad = T))
+rm(col_pop, ma_pop, ne_pop)
+
+## plot variant-specific case counts per 100K
+p1 = tots %>%
+  filter((Date >= as.Date("2021-12-03")) & (Date <= as.Date("2022-01-12"))) %>%
+  ggplot(aes(Date, Roll, fill = Label)) +
+  geom_smooth(aes(Date, Roll, col = Label), se = F, show.legend = F, span = 0.75) +
+  geom_point(aes(Date, Roll), pch = 21, size=3)  +
+  scale_color_manual(values=instvarcols) +
+  scale_fill_manual(values=instvarcols) +
+  scale_y_continuous("Cases per 100K",limits = c(0, 400)) + 
+  theme(legend.text=element_text(size=12), legend.title=element_text(size=14)) +
+  labs(x="Date",
+       fill="Institution")  +
+  scale_x_continuous(breaks=as.Date(c("2021-12-03", "2021-12-13", "2021-12-23",
+                                      "2022-01-02", "2022-01-12")),
+                     limits=c(as.Date("2021-12-03"),
+                              as.Date("2022-01-12")),
+                     labels=c("Dec 03", "Dec 13", "Dec 23", "Jan 01", "Jan 12"))
+p1
+ggsave("outputs/cases_per_100k.png", units="cm", width=15, height=10)
+#ggsave("outputs/cases_per_100k.svg", units="cm", width=15, height=10)
+
+# concatenate panels
+p <- cowplot::plot_grid(p1, p2, nrow=2, labels=c("A", "B"))
 p
-ggsave("outputs/figure1.png", units="cm", width=25, height=35)
-#ggsave("outputs/figure1.svg", units="cm", width=20, height=20)
+ggsave("outputs/figure1_new.png", units="cm", width=25, height=25)
+#ggsave("outputs/figure1_new.svg", units="cm", width=25, height=25)
 
 # clean up
-rm(p1, p2, p3, p)
+rm(p, p1, p2)
 
 ## fin! ------------------------------------------------------------------------
 sessionInfo()
